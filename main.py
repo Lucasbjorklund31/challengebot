@@ -37,10 +37,9 @@ Note: This is a foundational implementation. You may want to add additional feat
 import sqlite3
 import logging
 from datetime import datetime, timedelta, time
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes, JobQueue
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, filters, ContextTypes
 import re
-from collections import defaultdict
 
 def escape_markdown_v2(text):
     """Escape special characters for MarkdownV2"""
