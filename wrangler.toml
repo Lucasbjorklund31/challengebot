@@ -9,7 +9,7 @@ compatibility_flags = ["python_workers"]
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "challengebot-database"
-database_id = "090fbfd2-4b22-49a8-ae8d-8b8b99417392
+database_id = "090fbfd2-4b22-49a8-ae8d-8b8b99417392"
 
 [env.development]
 [env.development.vars]
