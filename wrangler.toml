@@ -1,0 +1,21 @@
+name = "telegram-competition-bot"
+main = "main.py"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["python_workers"]
+
+[env.production.vars]
+# Set your bot token as an environment variable
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "competition-bot"
+database_id = "your-d1-database-id-here"
+
+[env.development]
+[env.development.vars]
+# Development environment variables
+
+[[env.development.d1_databases]]
+binding = "DB"
+database_name = "competition-bot-dev"
+database_id = "your-dev-d1-database-id-here"

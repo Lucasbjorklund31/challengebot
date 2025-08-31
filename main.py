@@ -1,21 +1,12 @@
 
 """
-Monthly Competition Telegram Bot
+Monthly Competition Telegram Bot - Cloudflare Workers Version
 
 Setup Instructions:
-1. Install required packages:
-   pip install python-telegram-bot sqlite3
-
-2. Create a bot with @BotFather on Telegram and get your bot token
-
-3. Replace "YOUR_BOT_TOKEN_HERE" with your actual bot token
-
-4. Run the script:
-   python competition_bot.py
-
-5. Add the bot to your Telegram group - the person who adds it becomes the first admin
-
-6. Create your first challenge using /startchallenge in a private message to the bot
+1. Deploy to Cloudflare Workers with python_workers compatibility flag
+2. Create a D1 database and bind it as 'DB' in wrangler.toml
+3. Set BOT_TOKEN as an environment variable in Workers
+4. Set up webhook URL in Telegram Bot API
 
 Features:
 - User registration with custom usernames
@@ -25,21 +16,21 @@ Features:
 - Challenge voting system
 - Complete CRUD operations for scores
 - Confirmation workflows for all critical operations
-- SQLite database for data persistence
+- Cloudflare D1 database for data persistence
 
-Note: This is a foundational implementation. You may want to add additional features like:
-- Challenge end dates and automatic archiving
-- More sophisticated admin controls
-- Data export functionality
-- Enhanced error handling and logging
+Deployment:
+- Uses Cloudflare Workers Python runtime
+- Webhook-based instead of polling
+- D1 database for persistence
 """
 
-import sqlite3
 import logging
-from datetime import datetime, timedelta, time
-from telegram import Update
+import json
+from datetime import datetime, timedelta
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, filters, ContextTypes
 import re
+from workers import WorkerEntrypoint, Response
 
 def escape_markdown_v2(text):
     """Escape special characters for MarkdownV2"""
@@ -76,27 +67,26 @@ REMOVE_CHALLENGE_SELECT, REMOVE_CHALLENGE_CONFIRM = range(2)
 FEEDBACK_VIEWING = range(1)
 
 class CompetitionBot:
-    def __init__(self, token):
+    def __init__(self, token, db):
         self.token = token
-        self.init_database()
+        self.db = db
+        # init_database() is now async and should be called separately
         
-    def init_database(self):
-        """Initialize SQLite database with required tables"""
-        conn = sqlite3.connect('competition_bot.db')
-        cursor = conn.cursor()
+    async def init_database(self):
+        """Initialize D1 database with required tables"""
         
         # Users table
-        cursor.execute('''
+        await self.db.prepare('''
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
                 username TEXT,
                 registered_username TEXT UNIQUE,
                 registration_date DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        ''').run()
         
         # Scores table
-        cursor.execute('''
+        await self.db.prepare('''
             CREATE TABLE IF NOT EXISTS scores (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
@@ -106,10 +96,10 @@ class CompetitionBot:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(telegram_id)
             )
-        ''')
+        ''').run()
         
         # Challenges table
-        cursor.execute('''
+        await self.db.prepare('''
             CREATE TABLE IF NOT EXISTS challenges (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 description TEXT,
@@ -122,38 +112,24 @@ class CompetitionBot:
                 created_by INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        ''').run()
         
         # Add missing columns to challenges table if they don't exist
-        try:
-            cursor.execute("ALTER TABLE challenges ADD COLUMN challenge_type TEXT DEFAULT 'points'")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        try:
-            cursor.execute("ALTER TABLE challenges ADD COLUMN type_description TEXT")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        try:
-            cursor.execute("ALTER TABLE challenges ADD COLUMN created_by INTEGER")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        try:
-            cursor.execute("ALTER TABLE challenges ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        # D1 handles schema evolution differently, so we'll skip these for now
+        # They're already in the CREATE TABLE IF NOT EXISTS statement
         
         # Admins table
-        cursor.execute('''
+        await self.db.prepare('''
             CREATE TABLE IF NOT EXISTS admins (
                 user_id INTEGER PRIMARY KEY,
                 added_by INTEGER,
                 added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(telegram_id)
             )
-        ''')
+        ''').run()
         
         # Challenge suggestions table
-        cursor.execute('''
+        await self.db.prepare('''
             CREATE TABLE IF NOT EXISTS challenge_suggestions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 suggested_by INTEGER,
@@ -162,29 +138,29 @@ class CompetitionBot:
                 votes INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        ''').run()
         
         # Votes table
-        cursor.execute('''
+        await self.db.prepare('''
             CREATE TABLE IF NOT EXISTS votes (
                 user_id INTEGER,
                 suggestion_id INTEGER,
                 PRIMARY KEY (user_id, suggestion_id)
             )
-        ''')
+        ''').run()
         
         # Challenge notifications table
-        cursor.execute('''
+        await self.db.prepare('''
             CREATE TABLE IF NOT EXISTS challenge_notifications (
                 challenge_id INTEGER,
                 notification_type TEXT,
                 sent_date DATETIME DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (challenge_id, notification_type)
             )
-        ''')
+        ''').run()
         
         # Baseline values table for change challenges
-        cursor.execute('''
+        await self.db.prepare('''
             CREATE TABLE IF NOT EXISTS baseline_values (
                 user_id INTEGER,
                 challenge_id INTEGER,
@@ -195,10 +171,10 @@ class CompetitionBot:
                 FOREIGN KEY (user_id) REFERENCES users(telegram_id),
                 FOREIGN KEY (challenge_id) REFERENCES challenges(id)
             )
-        ''')
+        ''').run()
         
         # Feedback table
-        cursor.execute('''
+        await self.db.prepare('''
             CREATE TABLE IF NOT EXISTS feedback (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
@@ -207,31 +183,22 @@ class CompetitionBot:
                 submitted_date DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(telegram_id)
             )
-        ''')
-        
-        conn.commit()
-        conn.close()
+        ''').run()
 
     def get_db_connection(self):
-        """Get database connection"""
-        return sqlite3.connect('competition_bot.db')
+        """Get database connection - returns D1 database instance"""
+        return self.db
 
-    def is_admin(self, user_id):
+    async def is_admin(self, user_id):
         """Check if user is admin"""
         # Check if user is lucaspuu (fixed admin)
-        conn = self.get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT username FROM users WHERE telegram_id = ?', (user_id,))
-        user_result = cursor.fetchone()
-        if user_result and user_result[0] == 'lucaspuu':
-            conn.close()
+        user_result = await self.db.prepare('SELECT username FROM users WHERE telegram_id = ?').bind(user_id).first()
+        if user_result and user_result['username'] == 'lucaspuu':
             return True
         
         # Check regular admin status
-        cursor.execute('SELECT 1 FROM admins WHERE user_id = ?', (user_id,))
-        result = cursor.fetchone() is not None
-        conn.close()
-        return result
+        admin_result = await self.db.prepare('SELECT 1 FROM admins WHERE user_id = ?').bind(user_id).first()
+        return admin_result is not None
 
     def get_current_challenge(self):
         """Get current active challenge (including upcoming and grace period)"""
@@ -842,7 +809,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text += """
 🛠️ *General Commands:*
 /cancel \\- Cancels the current operation\\. Can be useful if something seems to be stuck
-/feedback <feedback> \\- Sends anonymous feedback to my developer"""
+/feedback \\<feedback\\> \\- Sends anonymous feedback to my developer"""
         
         
     else:
@@ -875,7 +842,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🛠️ *General Commands:*
 /cancel \\- Cancels the current operation
-/feedback <feedback> \\- Send anonymous feedback
+/feedback \\<feedback\\> \\- Send anonymous feedback
 
 💬 *Need More Help?*
 Send me a private message for full command list\\!"""
@@ -2806,7 +2773,7 @@ async def show_feedback_cancel(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # Challenge commands
 async def challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current challenge info"""
+    """Show current challenge info with time-based logic"""
     bot = context.bot_data.get('bot_instance')
     current_challenge = bot.get_current_challenge()
     
@@ -2820,10 +2787,13 @@ async def challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Unpack only the values we actually have
     if len(current_challenge) == 8:
         # Handle 8-column case
-        _, description, scoring_system, start_date, end_date, _, _, _ = current_challenge
+        challenge_id, description, scoring_system, start_date, end_date, _, _, _ = current_challenge
+        challenge_type = 'points'  # Default fallback for 8-column case
     else:
         # Handle 10-column case - actual order from database after migration
-        _, description, scoring_system, start_date, end_date, _, _, _, _, _ = current_challenge
+        challenge_id, description, scoring_system, start_date, end_date, _, _, _, challenge_type, _ = current_challenge
+        if len(current_challenge) < 10:
+            challenge_type = 'points'  # Default fallback
     
     # Get actual dynamic status
     actual_status, status_message = bot.get_challenge_status(current_challenge)
@@ -2832,17 +2802,149 @@ async def challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         start_formatted = datetime.strptime(str(start_date), '%Y-%m-%d').strftime('%d/%m/%Y')
         end_formatted = datetime.strptime(str(end_date), '%Y-%m-%d').strftime('%d/%m/%Y')
+        end_datetime = datetime.strptime(str(end_date), '%Y-%m-%d') + timedelta(days=1) - timedelta(seconds=1)
     except:
         start_formatted = str(start_date)
         end_formatted = str(end_date)
+        end_datetime = datetime.now() - timedelta(days=10)  # Fallback to very old date
     
-    challenge_info = f"🎯 _*Current Challenge*_ 🎯\n\n"
-    challenge_info += f"_*Description:*_\n\n{escape_markdown_v2(description)}\n\n"
-    challenge_info += f"_*Scoring:*_ {escape_markdown_v2(scoring_system)}\n"
-    challenge_info += f"_*Period:*_ {escape_markdown_v2(start_formatted)} to {escape_markdown_v2(end_formatted)}\n"
-    challenge_info += f"_*Status:*_ {status_message}"
+    now = datetime.now()
+    days_since_end = (now - end_datetime).days
+    
+    # Time-based logic
+    if actual_status == "ended" and days_since_end == 0:
+        # Day 0: Challenge just ended - show that time has ended but final submissions can be included
+        challenge_info = f"⏰ _*Challenge Time Has Ended*_ ⏰\n\n"
+        challenge_info += f"_*Description:*_\n\n{escape_markdown_v2(description)}\n\n"
+        challenge_info += f"_*Scoring:*_ {escape_markdown_v2(scoring_system)}\n"
+        challenge_info += f"_*Period:*_ {escape_markdown_v2(start_formatted)} to {escape_markdown_v2(end_formatted)}\n\n"
+        challenge_info += f"🔔 *The challenge time has ended\\!*\n\n"
+        challenge_info += f"Final submissions can still be included before results are announced\\."
+        
+    elif actual_status == "ended" and 1 <= days_since_end <= 2:
+        # Day 1-2: Show previous challenge winners
+        challenge_info = await _get_previous_challenge_winners(bot, challenge_id, challenge_type, description, start_formatted, end_formatted)
+        
+    elif actual_status == "ended" and days_since_end >= 3:
+        # Day 3+: Move to past challenges and show current competition
+        # First, move this challenge to past challenges if not already done
+        await _move_to_past_challenges(bot, challenge_id)
+        # Then get the new current challenge
+        new_current_challenge = bot.get_current_challenge()
+        if new_current_challenge:
+            return await challenge(update, context)  # Recursively call with new current challenge
+        else:
+            await update.message.reply_text("No active challenge currently\\.", parse_mode='MarkdownV2')
+            return
+    else:
+        # Normal active/upcoming challenge display
+        challenge_info = f"🎯 _*Current Challenge*_ 🎯\n\n"
+        challenge_info += f"_*Description:*_\n\n{escape_markdown_v2(description)}\n\n"
+        challenge_info += f"_*Scoring:*_ {escape_markdown_v2(scoring_system)}\n"
+        challenge_info += f"_*Period:*_ {escape_markdown_v2(start_formatted)} to {escape_markdown_v2(end_formatted)}\n"
+        challenge_info += f"_*Status:*_ {status_message}"
 
     await update.message.reply_text(challenge_info, parse_mode='MarkdownV2')
+
+async def _get_previous_challenge_winners(bot, challenge_id, challenge_type, description, start_formatted, end_formatted):
+    """Get winners for a recently ended challenge"""
+    conn = bot.get_db_connection()
+    cursor = conn.cursor()
+    
+    challenge_info = f"🏆 _*Previous Challenge Winners*_ 🏆\n\n"
+    challenge_info += f"_*Description:*_\n\n{escape_markdown_v2(description)}\n\n"
+    challenge_info += f"_*Period:*_ {escape_markdown_v2(start_formatted)} to {escape_markdown_v2(end_formatted)}\n\n"
+    
+    try:
+        if challenge_type == 'change':
+            # For change challenges, get top performers by absolute change
+            cursor.execute('''
+                SELECT 
+                    u.registered_username, 
+                    ((b.current_value - b.baseline_value) / ABS(b.baseline_value)) * 100 as percent_change,
+                    b.baseline_value,
+                    b.current_value
+                FROM baseline_values b
+                JOIN users u ON b.user_id = u.telegram_id
+                WHERE b.challenge_id = ? AND b.baseline_value != 0
+                ORDER BY ABS(((b.current_value - b.baseline_value) / ABS(b.baseline_value)) * 100) DESC
+                LIMIT 3
+            ''', (challenge_id,))
+            
+            results = cursor.fetchall()
+            if results:
+                medals = ["🥇", "🥈", "🥉"]
+                for i, (username, change, baseline, current) in enumerate(results):
+                    medal = medals[i] if i < 3 else "🏅"
+                    change_sign = "+" if change > 0 else ""
+                    challenge_info += f"{medal} {escape_markdown_v2(username)}: {change_sign}{change:.2f}%\n"
+                    challenge_info += f"   {baseline} → {current}\n\n"
+            else:
+                challenge_info += "No participants found\\.\n\n"
+        else:
+            # For points challenges, get top scorers
+            cursor.execute('''
+                SELECT u.registered_username, SUM(s.points) as total_points
+                FROM scores s
+                JOIN users u ON s.user_id = u.telegram_id
+                WHERE s.challenge_id = ?
+                GROUP BY s.user_id, u.registered_username
+                ORDER BY total_points DESC
+                LIMIT 3
+            ''', (challenge_id,))
+            
+            results = cursor.fetchall()
+            if results:
+                medals = ["🥇", "🥈", "🥉"]
+                for i, (username, points) in enumerate(results):
+                    medal = medals[i] if i < 3 else "🏅"
+                    challenge_info += f"{medal} {escape_markdown_v2(username)}: {points:,} points\n"
+            else:
+                challenge_info += "No participants found\\.\n\n"
+                
+        challenge_info += "\nView more past challenges with /pastchallenges"
+        
+    except Exception as e:
+        logger.error(f"Error getting previous challenge winners: {e}")
+        challenge_info += "Error retrieving winner information\\.\n\n"
+    finally:
+        conn.close()
+    
+    return challenge_info
+
+async def _move_to_past_challenges(bot, challenge_id):
+    """Move a challenge to past challenges table if it doesn't already exist there"""
+    conn = bot.get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Check if challenge already exists in past_challenges
+        cursor.execute('SELECT id FROM past_challenges WHERE original_challenge_id = ?', (challenge_id,))
+        if cursor.fetchone():
+            return  # Already moved
+        
+        # Get challenge data
+        cursor.execute('SELECT description, start_date, end_date, challenge_type FROM challenges WHERE id = ?', (challenge_id,))
+        challenge_data = cursor.fetchone()
+        
+        if challenge_data:
+            description, start_date, end_date, challenge_type = challenge_data
+            # Insert into past_challenges table
+            cursor.execute('''
+                INSERT INTO past_challenges (original_challenge_id, description, start_date, end_date, challenge_type)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (challenge_id, description, start_date, end_date, challenge_type or 'points'))
+            
+            # Update the original challenge status to 'completed'
+            cursor.execute('UPDATE challenges SET status = ? WHERE id = ?', ('completed', challenge_id))
+            
+            conn.commit()
+            
+    except Exception as e:
+        logger.error(f"Error moving challenge to past challenges: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 async def next_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show and vote on next challenge suggestions"""
@@ -3296,30 +3398,51 @@ def get_finnish_time():
     finnish_time = utc_now + timedelta(hours=2)
     return finnish_time
 
-async def check_challenge_notifications(context: ContextTypes.DEFAULT_TYPE):
-    """Check and send challenge notifications at specific Finnish times"""
-    bot_instance = context.bot_data.get('bot_instance')
-    if bot_instance:
-        finnish_time = get_finnish_time()
-        logger.info(f"Running notification check at Finnish time: {finnish_time.strftime('%H:%M')}")
-        await bot_instance.check_and_send_notifications(context.application)
 
-def main():
-    """Main function to run the bot"""
-    # Get your bot token from @BotFather on Telegram
-    # Instructions: https://core.telegram.org/bots#6-botfather
-    TOKEN = "7954500541:AAFjO4FDF977AZTst6rCP38FNEgUciCRxwM"  # Replace this with your actual token
+class Default(WorkerEntrypoint):
+    """Cloudflare Workers entry point for Telegram bot"""
     
-    bot_instance = CompetitionBot(TOKEN)
+    async def fetch(self, request):
+        """Handle incoming webhook requests"""
+        if request.method != 'POST':
+            return Response("Method not allowed", status=405)
+        
+        try:
+            # Get bot token and D1 database from environment
+            token = self.env.BOT_TOKEN
+            db = self.env.DB
+            
+            # Initialize bot instance
+            bot_instance = CompetitionBot(token, db)
+            await bot_instance.init_database()
+            
+            # Create application
+            application = Application.builder().token(token).build()
+            
+            # Store bot instance in context
+            application.bot_data['bot_instance'] = bot_instance
+            
+            # Setup all handlers
+            await self.setup_handlers(application)
+            
+            # Parse the incoming update
+            update_data = await request.json()
+            update = Update.de_json(update_data, application.bot)
+            
+            # Process the update
+            await application.process_update(update)
+            
+            return Response("OK", status=200)
+            
+        except Exception as e:
+            print(f"Error processing webhook: {e}")
+            return Response("Error", status=500)
     
-    # Create application
-    application = Application.builder().token(TOKEN).build()
-    
-    # Store bot instance in context
-    application.bot_data['bot_instance'] = bot_instance
-    
-    # Add conversation handlers
-    register_handler = ConversationHandler(
+    async def setup_handlers(self, application):
+        """Setup all bot handlers"""
+        
+        # Add conversation handlers
+        register_handler = ConversationHandler(
         entry_points=[CommandHandler('register', register_start)],
         states={
             REGISTER_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_username)],
@@ -3510,29 +3633,6 @@ def main():
         handle_past_challenge_selection
     ))
     
-    # Schedule notification checking at specific Finnish times
-    job_queue = application.job_queue
-    
-    # Run at midnight Finnish time (00:00) for final results and status updates
-    job_queue.run_daily(
-        check_challenge_notifications, 
-        time=time(hour=22, minute=0),  # 22:00 UTC = 00:00 Finnish time (UTC+2)
-        name="midnight_finnish_check"
-    )
-    
-    # Run at noon Finnish time (12:00) for challenge start notifications
-    job_queue.run_daily(
-        check_challenge_notifications,
-        time=time(hour=10, minute=0),  # 10:00 UTC = 12:00 Finnish time (UTC+2)
-        name="noon_finnish_check"
-    )
-    
-    # Run at 6 PM Finnish time (18:00) for challenge end notifications
-    job_queue.run_daily(
-        check_challenge_notifications,
-        time=time(hour=16, minute=0),  # 16:00 UTC = 18:00 Finnish time (UTC+2)
-        name="evening_finnish_check"
-    )
     
     # Run the bot
     print("Bot is starting...")
