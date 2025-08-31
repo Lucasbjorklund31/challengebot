@@ -7,9 +7,16 @@ A Telegram bot for managing monthly competitions in groups with user registratio
 - `/stats` - Show current monthly leaderboard (total points)
 - `/statsweek` - Show current week's cumulative points
 - `/statslastweek` - Show previous week's points
+- `/statsgain` - Top gainers (change challenges)
+- `/statsloss` - Top losers (change challenges)
+- `/statschange` - Overall change leaderboard
 - `/challenge` - Display current challenge information
 - `/nextchallenge` - View/vote on suggested challenges (numbered list)
 - `/pastchallenges` - View final results from past challenges
+- `/newsuggest` - Suggest a new challenge idea
+- `/feedback` - Submit feedback about the bot
+- `/cancel` - Cancel current operation
+- `/help` - Show all available commands
 
 ## DM Commands (User)
 - `/register` - Register username for competitions
@@ -22,7 +29,12 @@ A Telegram bot for managing monthly competitions in groups with user registratio
 - `/addadmin` - Add admin by Telegram username
 - `/removeadmin` - Remove admin by Telegram username
 - `/startchallenge` - Start new challenge (description, scoring, time period)
+- `/editchallenge` - Edit existing challenge
+- `/removechallenge` - Remove a challenge
 - `/removeentry` - Remove user entry from competition
+- `/setbaseline` - Set baseline value (change challenges)
+- `/updatevalue` - Update value
+- `/showfeedback` - Show submitted feedback
 
 ## Core Features
 
