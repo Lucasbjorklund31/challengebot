@@ -842,7 +842,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text += """
 🛠️ *General Commands:*
 /cancel \\- Cancels the current operation\\. Can be useful if something seems to be stuck
-/feedback <feedback> \\- Sends anonymous feedback to my developer"""
+/feedback \\<feedback\\> \\- Sends anonymous feedback to my developer"""
         
         
     else:
@@ -875,7 +875,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🛠️ *General Commands:*
 /cancel \\- Cancels the current operation
-/feedback <feedback> \\- Send anonymous feedback
+/feedback \\<feedback\\> \\- Send anonymous feedback
 
 💬 *Need More Help?*
 Send me a private message for full command list\\!"""
