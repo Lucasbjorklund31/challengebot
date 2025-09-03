@@ -36,28 +36,13 @@ Note: This is a foundational implementation. You may want to add additional feat
 
 import sqlite3
 import logging
+import re
 from datetime import datetime, timedelta, time
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, filters, ContextTypes
-import re
 
-def escape_markdown_v2(text):
-    """Escape special characters for MarkdownV2"""
-    if not text:
-        return text
-    # Characters that need escaping: _*[]()~`>#+-=|{}.!
-    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in escape_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
-
-# Enable logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Suppress verbose HTTP request logs
-logging.getLogger('httpx').setLevel(logging.WARNING)
-logging.getLogger('telegram.ext.Application').setLevel(logging.WARNING)
+# Constants
+DATABASE_NAME = 'competition_bot.db'
 
 # Conversation states
 ADD_SCORE_DATE, ADD_SCORE_POINTS, ADD_SCORE_CONFIRM = range(3)
@@ -75,6 +60,43 @@ EDIT_CHALLENGE_SELECT, EDIT_CHALLENGE_FIELD, EDIT_CHALLENGE_VALUE, EDIT_CHALLENG
 REMOVE_CHALLENGE_SELECT, REMOVE_CHALLENGE_CONFIRM = range(2)
 FEEDBACK_VIEWING = range(1)
 
+def escape_markdown_v2(text):
+    """Escape special characters for MarkdownV2"""
+    if not text:
+        return text
+    # Characters that need escaping: _*[]()~`>#+-=|{}.!
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+async def send_md_message(update: Update, text: str, **kwargs):
+    """Send a message with MarkdownV2 formatting"""
+    await update.message.reply_text(text, parse_mode='MarkdownV2', **kwargs)
+
+async def send_private_only_message(update: Update):
+    """Send standard private message only response"""
+    await send_md_message(update, "Please use this command in a private message\\.")
+
+def get_db_connection():
+    """Get database connection with proper setup"""
+    conn = sqlite3.connect(DATABASE_NAME)
+    conn.execute('PRAGMA foreign_keys = ON')
+    return conn
+
+def handle_db_error(error, operation="database operation"):
+    """Standard database error handling"""
+    logger.error(f"Error during {operation}: {error}")
+    return f"Sorry, there was an error during the {operation}\\. Please try again\\."
+
+# Enable logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Suppress verbose HTTP request logs
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('telegram.ext.Application').setLevel(logging.WARNING)
+
 class CompetitionBot:
     def __init__(self, token):
         self.token = token
@@ -82,7 +104,7 @@ class CompetitionBot:
         
     def init_database(self):
         """Initialize SQLite database with required tables"""
-        conn = sqlite3.connect('competition_bot.db')
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         # Users table
@@ -776,60 +798,53 @@ async def new_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 conn.close()
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help command handler"""
-    bot = context.bot_data.get('bot_instance')
-    is_admin = bot.is_admin(update.effective_user.id) if bot else False
-    
-    # Check if current challenge is a change challenge
-    current_challenge = bot.get_current_challenge() if bot else None
-    is_change_challenge = (current_challenge and len(current_challenge) > 3 and 
-                          current_challenge[3] == 'change') # challenge[3] is challenge_type
-    
-    if update.effective_chat.type == 'private':
-        # Private message - show all relevant commands
-        help_text = """🎯 *Competition Bot Help* 🎯
-
-📊 *Leaderboards & Stats:*
+def get_stats_commands(is_change_challenge: bool) -> str:
+    """Generate stats commands text"""
+    base = """📊 *Leaderboards:*
 /stats \\- Monthly leaderboard
 /statsweek \\- Current week points
 /statslastweek \\- Previous week points"""
-        
-        # Add change challenge stats only if current challenge is a change type
-        if is_change_challenge:
-            help_text += """
-/statsgain \\- Top gainers \(change challenges\)
-/statsloss \\- Top losers \(change challenges\) 
+    
+    if is_change_challenge:
+        base += """
+/statsgain \\- Top gainers \\(change challenges\\)
+/statsloss \\- Top losers \\(change challenges\\)
 /statschange \\- Overall change leaderboard"""
-        
-        help_text += """
+    return base
 
-🎮 *Challenge Information:*
+def get_challenge_commands(is_private: bool) -> str:
+    """Generate challenge commands text"""
+    if is_private:
+        return """🎮 *Challenge Information:*
 /challenge \\- Current challenge details
 /pastchallenges \\- View past challenge results
 
 💡 *Challenge Suggestions:*
 /nextchallenge \\- Vote on upcoming challenges
-/newsuggest \\- Suggest a new challenge idea
+/newsuggest \\- Suggest a new challenge idea"""
+    else:
+        return """🎮 *Challenges:*
+/challenge \\- Current challenge details
+/nextchallenge \\- Vote on upcoming challenges
+/pastchallenges \\- View past challenge results"""
 
-👤 *Personal Management \(DM only\):*
+def get_personal_commands(is_change_challenge: bool) -> str:
+    """Generate personal management commands"""
+    base = """👤 *Personal Management \\(DM only\\):*
 /register \\- Register your username
 /addscore \\- Add points for specific dates
 /removescore \\- Remove points from dates
 /editscore \\- Edit existing points"""
-        
-        # Add change challenge management commands only if current challenge is a change type
-        if is_change_challenge:
-            help_text += """
-/setbaseline \\- Set baseline value \(change challenges\)
-/updatevalue \\- Update current value \(change challenges\)"""
+    
+    if is_change_challenge:
+        base += """
+/setbaseline \\- Set baseline value \\(change challenges\\)
+/updatevalue \\- Update current value \\(change challenges\\)"""
+    return base
 
-        
-        # Add admin commands only for admins
-        if is_admin:
-            help_text += """
-
-👑 *Admin Commands \(DM only\):*
+def get_admin_commands() -> str:
+    """Generate admin commands text"""
+    return """👑 *Admin Commands \\(DM only\\):*
 /admins \\- List current admins
 /addadmin \\- Add new admin
 /removeadmin \\- Remove admin privileges
@@ -838,55 +853,64 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /removechallenge \\- Remove challenge permanently
 /removeentry \\- Remove user from competition
 /showfeedback \\- View submitted feedback"""
-        
-        help_text += """
-🛠️ *General Commands:*
+
+def get_general_commands(is_private: bool) -> str:
+    """Generate general commands text"""
+    if is_private:
+        return """🛠️ *General Commands:*
 /cancel \\- Cancels the current operation\\. Can be useful if something seems to be stuck
 /feedback \\<feedback\\> \\- Sends anonymous feedback to my developer"""
-        
-        
     else:
-        # Group message - show group-relevant commands only
-        help_text = """🎯 *Competition Bot \\- Group Commands* 🎯
+        return """🛠️ *General Commands:*
+/cancel \\- Cancels the current operation
+/feedback \\<feedback\\> \\- Send anonymous feedback"""
 
-📊 *Leaderboards:*
-/stats \\- Monthly leaderboard
-/statsweek \\- Current week points
-/statslastweek \\- Previous week points"""
-        
-        # Add change challenge stats only if current challenge is a change type
-        if is_change_challenge:
-            help_text += """
-/statsgain \\- Top gainers \(change challenges\)
-/statsloss \\- Top losers \(change challenges\)
-/statschange \\- Overall change leaderboard"""
-        
-        help_text += """
-
-🎮 *Challenges:*
-/challenge \\- Current challenge details
-/nextchallenge \\- Vote on upcoming challenges
-/pastchallenges \\- View past challenge results
-
-🗳️ *Voting Instructions:*
+def get_voting_instructions() -> str:
+    """Generate voting instructions text"""
+    return """🗳️ *Voting Instructions:*
 \\- After /nextchallenge: Reply with number to vote
 \\- Reply 'new' for challenge suggestion help
-\\- After /pastchallenges: Reply with number for details
+\\- After /pastchallenges: Reply with number for details"""
 
-🛠️ *General Commands:*
-/cancel \\- Cancels the current operation
-/feedback \\<feedback\\> \\- Send anonymous feedback
-
-💬 *Need More Help?*
-Send me a private message for full command list\\!"""
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Help command handler"""
+    bot = context.bot_data.get('bot_instance')
+    is_admin = bot.is_admin(update.effective_user.id) if bot else False
+    current_challenge = bot.get_current_challenge() if bot else None
+    is_change_challenge = (current_challenge and len(current_challenge) > 3 and current_challenge[3] == 'change')
+    is_private = update.effective_chat.type == 'private'
     
+    # Build help text using helper functions
+    sections = []
+    
+    if is_private:
+        sections.extend([
+            "🎯 *Competition Bot Help* 🎯\n",
+            get_stats_commands(is_change_challenge),
+            get_challenge_commands(is_private),
+            get_personal_commands(is_change_challenge)
+        ])
+        if is_admin:
+            sections.append(get_admin_commands())
+        sections.append(get_general_commands(is_private))
+    else:
+        sections.extend([
+            "🎯 *Competition Bot \\- Group Commands* 🎯\n",
+            get_stats_commands(is_change_challenge),
+            get_challenge_commands(is_private),
+            get_voting_instructions(),
+            get_general_commands(is_private),
+            "\n💬 *Need More Help?*\nSend me a private message for full command list\\!"
+        ])
+    
+    help_text = "\n\n".join(sections)
     await update.message.reply_text(help_text, parse_mode='MarkdownV2')
 
 # Registration conversation
 async def register_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start registration process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     await update.message.reply_text("Please enter the username you'd like to register for competitions:", parse_mode='MarkdownV2')
@@ -949,7 +973,7 @@ async def register_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_score_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start add score process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     await update.message.reply_text(
@@ -1368,7 +1392,7 @@ async def stats_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def remove_score_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start remove score process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     await update.message.reply_text(
@@ -1465,7 +1489,7 @@ async def remove_score_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def edit_score_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start edit score process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     await update.message.reply_text(
@@ -1650,7 +1674,7 @@ async def edit_score_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_challenge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start challenge creation process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     bot = context.bot_data.get('bot_instance')
@@ -1844,7 +1868,7 @@ async def start_challenge_cancel(update: Update, context: ContextTypes.DEFAULT_T
 async def add_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start add admin process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     bot = context.bot_data.get('bot_instance')
@@ -1941,7 +1965,7 @@ async def add_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def remove_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start remove admin process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     bot = context.bot_data.get('bot_instance')
@@ -2027,7 +2051,7 @@ async def remove_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def remove_entry_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start remove entry process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     bot = context.bot_data.get('bot_instance')
@@ -2234,7 +2258,7 @@ async def new_challenge_cancel(update: Update, context: ContextTypes.DEFAULT_TYP
 async def edit_challenge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start edit challenge process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     bot = context.bot_data.get('bot_instance')
@@ -2479,7 +2503,7 @@ async def edit_challenge_cancel(update: Update, context: ContextTypes.DEFAULT_TY
 async def remove_challenge_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start remove challenge process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     bot = context.bot_data.get('bot_instance')
@@ -2624,7 +2648,7 @@ async def remove_challenge_cancel(update: Update, context: ContextTypes.DEFAULT_
 async def admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List current admins"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return
     
     bot = context.bot_data.get('bot_instance')
@@ -2706,7 +2730,7 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_feedback_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start showing feedback with pagination (admin only)"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     bot = context.bot_data.get('bot_instance')
@@ -3078,7 +3102,7 @@ async def past_challenges(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setbaseline_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start baseline value setting process"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     bot = context.bot_data.get('bot_instance')
@@ -3168,7 +3192,7 @@ async def setbaseline_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def updatevalue_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start value update process for change challenges"""
     if update.effective_chat.type != 'private':
-        await update.message.reply_text("Please use this command in a private message.", parse_mode='MarkdownV2')
+        await send_private_only_message(update)
         return ConversationHandler.END
     
     bot = context.bot_data.get('bot_instance')
